@@ -4,7 +4,8 @@ import { Router } from "https://deno.land/x/oak@v12.6.1/mod.ts";
 async function sendInvitesApi(emails: string[], role: string, resend: boolean, token: string, accountId: string) {
     console.log(`Sending invites to ${emails.length} users for account ${accountId}`);
 
-    const url = `https://chat.openai.com/backend-api/teams/${accountId}/invites`;
+    // Updated to use /workspaces/ endpoint
+    const url = `https://chat.openai.com/backend-api/workspaces/${accountId}/invites`;
 
     try {
         const response = await fetch(url, {
