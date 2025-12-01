@@ -1,30 +1,31 @@
 import { Router } from "https://deno.land/x/oak@v12.6.1/mod.ts";
 
+const DEFAULT_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+
+type TokenSource = "provided" | "session-exchange";
+
 // Real implementation of sendInvitesApi
 async function sendInvitesApi(emails: string[], role: string, resend: boolean, token: string, accountId: string) {
     console.log(`Sending invites to ${emails.length} users for account ${accountId}`);
 
     try {
-        const payload = { emails, role, resend };
-        const workspaceResult = await postInvitesToEndpoint("workspaces", payload, token, accountId);
+        const payload: InvitePayload = { emails, role, resend };
 
-        if (workspaceResult.success) {
-            return workspaceResult;
-        }
+        let result = await tryInvitesWithToken(payload, token, accountId, "provided");
 
-        if (workspaceResult.statusCode === 404) {
-            console.warn(`Workspace invite endpoint returned 404 (${workspaceResult.endpoint}). Falling back to /accounts endpoint. Response: ${workspaceResult.error}`);
-            const fallbackResult = await postInvitesToEndpoint("accounts", payload, token, accountId);
+        if (!result.success && result.statusCode === 401) {
+            console.warn("Invite request returned 401 with the provided token. Attempting to derive an access token from a session token.");
+            const derivedToken = await exchangeSessionTokenForAccessToken(token);
 
-            if (!fallbackResult.success) {
-                console.error(`API Error via ${fallbackResult.endpoint} (${fallbackResult.statusCode}):`, fallbackResult.error);
+            if (derivedToken) {
+                result = await tryInvitesWithToken(payload, derivedToken, accountId, "session-exchange");
+            } else {
+                console.warn("Unable to derive an access token from the supplied value.");
             }
-
-            return fallbackResult;
         }
 
-        console.error(`API Error via ${workspaceResult.endpoint} (${workspaceResult.statusCode}):`, workspaceResult.error);
-        return workspaceResult;
+        return result;
 
     } catch (error) {
         console.error("Network or Logic Error in sendInvitesApi:", error);
@@ -38,11 +39,18 @@ interface InviteApiResult {
     error?: string;
     data?: unknown;
     endpoint: string;
+    tokenSource?: TokenSource;
+}
+
+interface InvitePayload {
+    emails: string[];
+    role: string;
+    resend: boolean;
 }
 
 async function postInvitesToEndpoint(
     endpointType: "workspaces" | "accounts",
-    payload: Record<string, unknown>,
+    payload: InvitePayload,
     token: string,
     accountId: string
 ): Promise<InviteApiResult> {
@@ -53,7 +61,7 @@ async function postInvitesToEndpoint(
         headers: {
             "Authorization": `Bearer ${token}`,
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": DEFAULT_USER_AGENT
         },
         body: JSON.stringify(payload)
     });
@@ -65,6 +73,67 @@ async function postInvitesToEndpoint(
 
     const data = await response.json();
     return { success: true, data, endpoint: url };
+}
+
+async function tryInvitesWithToken(
+    payload: InvitePayload,
+    token: string,
+    accountId: string,
+    source: TokenSource
+): Promise<InviteApiResult> {
+    const workspaceResult = await postInvitesToEndpoint("workspaces", payload, token, accountId);
+
+    if (workspaceResult.success) {
+        return { ...workspaceResult, tokenSource: source };
+    }
+
+    if (workspaceResult.statusCode === 404) {
+        console.warn(`Workspace invite endpoint returned 404 (${workspaceResult.endpoint}). Falling back to /accounts endpoint. Response: ${workspaceResult.error}`);
+        const fallbackResult = await postInvitesToEndpoint("accounts", payload, token, accountId);
+
+        if (!fallbackResult.success) {
+            console.error(`API Error via ${fallbackResult.endpoint} (${fallbackResult.statusCode}):`, fallbackResult.error);
+        }
+
+        return { ...fallbackResult, tokenSource: source };
+    }
+
+    console.error(`API Error via ${workspaceResult.endpoint} (${workspaceResult.statusCode}):`, workspaceResult.error);
+    return { ...workspaceResult, tokenSource: source };
+}
+
+async function exchangeSessionTokenForAccessToken(sessionToken: string): Promise<string | null> {
+    if (!sessionToken || sessionToken.trim().length === 0) {
+        return null;
+    }
+
+    try {
+        const response = await fetch("https://chat.openai.com/api/auth/session", {
+            headers: {
+                "User-Agent": DEFAULT_USER_AGENT,
+                "Cookie": `__Secure-next-auth.session-token=${sessionToken}`,
+                "Accept": "application/json"
+            }
+        });
+
+        if (!response.ok) {
+            console.warn(`Session token exchange failed (${response.status}): ${await response.text()}`);
+            return null;
+        }
+
+        const data = await response.json();
+        const accessToken = data?.accessToken;
+
+        if (typeof accessToken === "string" && accessToken.length > 0) {
+            return accessToken;
+        }
+
+        console.warn("Session token exchange succeeded but no access token was present in the payload.");
+        return null;
+    } catch (error) {
+        console.error("Error exchanging session token for access token:", error);
+        return null;
+    }
 }
 
 const router = new Router();
@@ -170,6 +239,9 @@ router.post("/api/invite", async (ctx) => {
         ctx.response.body = {
             success: result.success,
             team: config.name,
+            error: result.error,
+            statusCode: result.statusCode,
+            tokenSource: result.tokenSource,
             details: result
         };
     } catch (err) {
