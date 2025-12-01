@@ -4,37 +4,67 @@ import { Router } from "https://deno.land/x/oak@v12.6.1/mod.ts";
 async function sendInvitesApi(emails: string[], role: string, resend: boolean, token: string, accountId: string) {
     console.log(`Sending invites to ${emails.length} users for account ${accountId}`);
 
-    // Updated to use /workspaces/ endpoint
-    const url = `https://chat.openai.com/backend-api/workspaces/${accountId}/invites`;
-
     try {
-        const response = await fetch(url, {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${token}`,
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            },
-            body: JSON.stringify({
-                emails: emails,
-                role: role,
-                resend: resend
-            })
-        });
+        const payload = { emails, role, resend };
+        const workspaceResult = await postInvitesToEndpoint("workspaces", payload, token, accountId);
 
-        if (!response.ok) {
-            const text = await response.text();
-            console.error(`API Error (${response.status}):`, text);
-            return { success: false, statusCode: response.status, error: text };
+        if (workspaceResult.success) {
+            return workspaceResult;
         }
 
-        const data = await response.json();
-        return { success: true, data };
+        if (workspaceResult.statusCode === 404) {
+            console.warn(`Workspace invite endpoint returned 404 (${workspaceResult.endpoint}). Falling back to /accounts endpoint. Response: ${workspaceResult.error}`);
+            const fallbackResult = await postInvitesToEndpoint("accounts", payload, token, accountId);
+
+            if (!fallbackResult.success) {
+                console.error(`API Error via ${fallbackResult.endpoint} (${fallbackResult.statusCode}):`, fallbackResult.error);
+            }
+
+            return fallbackResult;
+        }
+
+        console.error(`API Error via ${workspaceResult.endpoint} (${workspaceResult.statusCode}):`, workspaceResult.error);
+        return workspaceResult;
 
     } catch (error) {
         console.error("Network or Logic Error in sendInvitesApi:", error);
         throw error;
     }
+}
+
+interface InviteApiResult {
+    success: boolean;
+    statusCode?: number;
+    error?: string;
+    data?: unknown;
+    endpoint: string;
+}
+
+async function postInvitesToEndpoint(
+    endpointType: "workspaces" | "accounts",
+    payload: Record<string, unknown>,
+    token: string,
+    accountId: string
+): Promise<InviteApiResult> {
+    const url = `https://chat.openai.com/backend-api/${endpointType}/${accountId}/invites`;
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${token}`,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        },
+        body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+        const text = await response.text();
+        return { success: false, statusCode: response.status, error: text, endpoint: url };
+    }
+
+    const data = await response.json();
+    return { success: true, data, endpoint: url };
 }
 
 const router = new Router();
