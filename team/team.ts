@@ -5,18 +5,53 @@ const DEFAULT_USER_AGENT =
 
 type TokenSource = "provided" | "session-exchange";
 
+function sanitizeTokenInput(rawToken: string): { value: string; wasCookie: boolean } {
+    if (!rawToken) {
+        return { value: "", wasCookie: false };
+    }
+
+    let token = rawToken.trim();
+    token = token.replace(/^Bearer\s+/i, "").trim();
+    token = token.replace(/^["']|["']$/g, "").trim();
+
+    const cookiePatterns = [
+        /(?:^|;\s*)(?:__Secure-)?next-auth\.session-token=([^;]+)/i,
+        /(?:^|;\s*)session_token=([^;]+)/i
+    ];
+
+    for (const pattern of cookiePatterns) {
+        const match = token.match(pattern);
+        if (match) {
+            return { value: match[1].trim(), wasCookie: true };
+        }
+    }
+
+    return { value: token, wasCookie: false };
+}
+
 // Real implementation of sendInvitesApi
 async function sendInvitesApi(emails: string[], role: string, resend: boolean, token: string, accountId: string) {
     console.log(`Sending invites to ${emails.length} users for account ${accountId}`);
 
     try {
         const payload: InvitePayload = { emails, role, resend };
+        const tokenInfo = sanitizeTokenInput(token);
 
-        let result = await tryInvitesWithToken(payload, token, accountId, "provided");
+        if (!tokenInfo.value) {
+            return {
+                success: false,
+                statusCode: 400,
+                error: "Token is empty after sanitizing input.",
+                endpoint: "",
+                tokenSource: "provided"
+            };
+        }
+
+        let result = await tryInvitesWithToken(payload, tokenInfo.value, accountId, "provided");
 
         if (!result.success && result.statusCode === 401) {
             console.warn("Invite request returned 401 with the provided token. Attempting to derive an access token from a session token.");
-            const derivedToken = await exchangeSessionTokenForAccessToken(token);
+            const derivedToken = await exchangeSessionTokenForAccessToken(tokenInfo.value);
 
             if (derivedToken) {
                 result = await tryInvitesWithToken(payload, derivedToken, accountId, "session-exchange");
